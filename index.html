@@ -1,1 +1,1149 @@
-<H1>Travel mind</H1><!DOCTYPE html>
+<H1>Travel mind</H1><!DOCTYPE html><!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 智慧旅遊規劃</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Google Fonts (Inter) -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+    <!-- 引入 Lucide Icons -->
+    <script src="https://unpkg.com/lucide-react@latest/dist/umd/lucide.min.js"></script>
+    
+    <style>
+        body {
+            font-family: 'Inter', 'Noto Sans TC', sans-serif;
+            background-color: #f8f9fa; /* 更柔和的背景色 */
+        }
+        /* 隱藏滾動條但保留滾動功能 */
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+        /* 頁面切換的淡入效果 */
+        .page-view {
+            display: none; /* 預設隱藏 */
+            animation: fadeIn 0.5s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        /* 彈窗動畫 */
+        .modal-content {
+            animation: slideInUp 0.3s ease-out;
+        }
+        @keyframes slideInUp {
+            from { opacity: 0; transform: translateY(50px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="text-gray-800">
+
+    <!-- 全域 Firebase 和 App 變數 -->
+    <script>
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        let firebaseConfig = {};
+        try {
+            firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { apiKey: "DEFAULT_KEY", authDomain: "DEFAULT_DOMAIN", projectId: "DEFAULT_PROJECT" };
+        } catch (e) {
+            console.error("Firebase config parsing error:", e);
+        }
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // API Key (Gemini) - 保持為空字串，Canvas 將自動注入
+        const GEMINI_API_KEY = "";
+    </script>
+
+    <!-- Firebase SDK 引入 -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            signInWithCustomToken, 
+            onAuthStateChanged,
+            createUserWithEmailAndPassword,
+            signInWithEmailAndPassword,
+            signOut as firebaseSignOut,
+            setPersistence,
+            browserLocalPersistence
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            doc, 
+            getDoc, 
+            setDoc, 
+            collection, 
+            addDoc, 
+            onSnapshot,
+            query,
+            where,
+            setLogLevel
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- 全域變數 ---
+        window.app = initializeApp(firebaseConfig);
+        window.db = getFirestore(window.app);
+        window.auth = getAuth(window.app);
+        window.currentUserId = null;
+        window.currentUserEmail = null;
+
+        // 設置日誌級別
+        setLogLevel('Debug');
+
+        // --- 核心 App 邏輯 ---
+        const authNav = document.getElementById('auth-nav');
+        const userNav = document.getElementById('user-nav');
+        const userEmailDisplay = document.getElementById('user-email-display');
+        const quickAccess = document.getElementById('quick-access');
+
+        // 認證狀態監聽
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                console.log("User is signed in:", user.uid);
+                window.currentUserId = user.uid;
+                window.currentUserEmail = user.email || "匿名使用者";
+                
+                // 更新 UI
+                authNav.classList.add('hidden');
+                userNav.classList.remove('hidden');
+                userEmailDisplay.textContent = window.currentUserEmail;
+
+                // 獲取使用者偏好
+                await fetchUserPreferences(user.uid);
+
+            } else {
+                console.log("User is signed out.");
+                window.currentUserId = null;
+                window.currentUserEmail = null;
+
+                // 更新 UI
+                authNav.classList.remove('hidden');
+                userNav.classList.add('hidden');
+                quickAccess.classList.add('hidden');
+
+                // 嘗試使用提供的 token 登入，否則匿名登入
+                try {
+                    if (initialAuthToken) {
+                        console.log("Attempting to sign in with custom token...");
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        console.log("No custom token, signing in anonymously...");
+                        await signInAnonymously(auth);
+                    }
+                } catch (error) {
+                    console.error("Auth error:", error);
+                    showMessage("認證失敗", `錯誤: ${error.message}`);
+                }
+            }
+        });
+
+        // 獲取使用者偏好 (例如常去地區)
+        async function fetchUserPreferences(userId) {
+            if (!userId) return;
+            const userProfileRef = doc(db, `artifacts/${appId}/users/${userId}/profile`, "preferences");
+            try {
+                const docSnap = await getDoc(userProfileRef);
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    const frequentPlaces = data.frequentPlaces || [];
+                    if (frequentPlaces.length > 0) {
+                        quickAccess.innerHTML = '<h3>您常瀏覽的地區：</h3>' +
+                            frequentPlaces.map(place => 
+                                `<button class="bg-white border border-blue-300 text-blue-600 px-4 py-1 rounded-full text-sm hover:bg-blue-50">${place}</button>`
+                            ).join(' ');
+                        quickAccess.classList.remove('hidden');
+                    }
+                } else {
+                    console.log("No preference document found.");
+                    quickAccess.classList.add('hidden');
+                }
+            } catch (error) {
+                console.error("Error fetching preferences:", error);
+            }
+        }
+
+        // --- 導覽邏輯 ---
+        window.showView = (viewId) => {
+            document.querySelectorAll('.page-view').forEach(view => {
+                view.style.display = 'none';
+            });
+            const activeView = document.getElementById(viewId);
+            if (activeView) {
+                activeView.style.display = 'block';
+            }
+            // 更新導覽列的活躍狀態
+            document.querySelectorAll('#main-nav button').forEach(btn => {
+                btn.classList.remove('text-blue-600', 'font-semibold');
+                btn.classList.add('text-gray-600');
+            });
+            const activeBtn = document.querySelector(`#main-nav button[data-view="${viewId}"]`);
+            if (activeBtn) {
+                activeBtn.classList.add('text-blue-600', 'font-semibold');
+                activeBtn.classList.remove('text-gray-600');
+            }
+        };
+
+        // --- 彈窗邏輯 ---
+        window.showModal = (modalId) => {
+            const modal = document.getElementById(modalId);
+            if (modal) modal.classList.remove('hidden');
+        };
+        window.closeModal = (modalId) => {
+            const modal = document.getElementById(modalId);
+            if (modal) modal.classList.add('hidden');
+        };
+
+        // --- 訊息彈窗 ---
+        window.showMessage = (title, message) => {
+            document.getElementById('message-title').textContent = title;
+            document.getElementById('message-body').textContent = message;
+            showModal('message-modal');
+        };
+
+        // --- 使用者認證 ---
+        window.handleRegister = async () => {
+            const email = document.getElementById('reg-email').value;
+            const pass = document.getElementById('reg-password').value;
+            if (!email || !pass) {
+                showMessage("註冊失敗", "請輸入電子郵件和密碼。");
+                return;
+            }
+            try {
+                await createUserWithEmailAndPassword(auth, email, pass);
+                closeModal('register-modal');
+                showMessage("註冊成功", "歡迎您！已自動為您登入。");
+            } catch (error) {
+                console.error("Register error:", error);
+                showMessage("註冊失敗", error.message);
+            }
+        };
+
+        window.handleLogin = async () => {
+            const email = document.getElementById('login-email').value;
+            const pass = document.getElementById('login-password').value;
+            if (!email || !pass) {
+                showMessage("登入失敗", "請輸入電子郵件和密碼。");
+                return;
+            }
+            try {
+                await setPersistence(auth, browserLocalPersistence); // 保持登入狀態
+                await signInWithEmailAndPassword(auth, email, pass);
+                closeModal('login-modal');
+                showMessage("登入成功", "歡迎回來！");
+            } catch (error) {
+                console.error("Login error:", error);
+                showMessage("登入失敗", error.message);
+            }
+        };
+
+        window.handleLogout = async () => {
+            try {
+                await firebaseSignOut(auth);
+                // onAuthStateChanged 將會處理 UI 更新並自動匿名登入
+                showMessage("登出成功", "您已登出。");
+            } catch (error) {
+                console.error("Logout error:", error);
+                showMessage("登出失敗", error.message);
+            }
+        };
+
+        // --- Gemini API 核心函式 ---
+
+        // 指數退避重試
+        async function fetchWithRetry(url, options, retries = 5, delay = 1000) {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.status === 429 || response.status >= 500) {
+                        // 僅在特定錯誤碼時重試
+                        throw new Error(`Server error: ${response.status}`);
+                    }
+                    return response;
+                } catch (error) {
+                    if (i === retries - 1) throw error;
+                    await new Promise(resolve => setTimeout(resolve, delay * (2 ** i)));
+                }
+            }
+        }
+
+        /**
+         * 呼叫 Gemini API (generateContent)
+         * @param {string} systemPrompt - 系統提示詞
+         * @param {string} userPrompt - 使用者提示詞
+         * @param {boolean} useSearch - 是否啟用 Google 搜尋
+         * @param {boolean} useJson - 是否要求 JSON 回應
+         * @param {object} jsonSchema - JSON Schema (如果 useJson 為 true)
+         */
+        async function callGeminiAPI(systemPrompt, userPrompt, useSearch = false, useJson = false, jsonSchema = null) {
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
+
+            const payload = {
+                contents: [{ parts: [{ text: userPrompt }] }],
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+                generationConfig: {}
+            };
+
+            if (useSearch) {
+                payload.tools = [{ "google_search": {} }];
+            }
+
+            if (useJson && jsonSchema) {
+                payload.generationConfig.responseMimeType = "application/json";
+                payload.generationConfig.responseSchema = jsonSchema;
+            }
+
+            try {
+                const response = await fetchWithRetry(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (!response.ok) {
+                    const errorBody = await response.text();
+                    throw new Error(`API 請求失敗: ${response.status} ${errorBody}`);
+                }
+
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+
+                if (candidate && candidate.content?.parts?.[0]) {
+                    const part = candidate.content.parts[0];
+                    let text = part.text;
+                    
+                    if (useJson) {
+                        // JSON 在 text 欄位中，解析它
+                        return JSON.parse(text);
+                    }
+
+                    // 處理 Google 搜尋的引用
+                    let sources = [];
+                    const groundingMetadata = candidate.groundingMetadata;
+                    if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                        sources = groundingMetadata.groundingAttributions
+                            .map(attr => ({
+                                uri: attr.web?.uri,
+                                title: attr.web?.title,
+                            }))
+                            .filter(source => source.uri && source.title);
+                    }
+                    
+                    return { text, sources };
+
+                } else {
+                    console.error("無效的 API 回應:", result);
+                    throw new Error("API 回應中未找到有效的內容。");
+                }
+            } catch (error) {
+                console.error("Gemini API 呼叫失敗:", error);
+                throw error;
+            }
+        }
+
+        // --- AI 行程規劃 ---
+        window.handleAIPlan = async (type = 'travel') => {
+            const loadingSpinner = document.getElementById('loading-spinner');
+            const resultContainer = document.getElementById('itinerary-result');
+            loadingSpinner.classList.remove('hidden');
+            resultContainer.innerHTML = '';
+            showView('view-itinerary'); // 切換到結果頁面
+
+            let systemPrompt = "你是一個專業的 AI 旅遊規劃助理。請根據使用者的需求，利用 Google 搜尋最新的即時開放資料（包含交通、景點、住宿、餐飲資訊，特別是大眾運輸），規劃一份詳細、合理且吸引人的旅遊行程。請考量評價、交通方便性和住宿選項。";
+            let userPrompt = "";
+
+            if (type === 'travel') {
+                const destination = document.getElementById('ai-destination').value;
+                const days = document.getElementById('ai-days').value;
+                const transport = document.getElementById('ai-transport').value;
+                const accommodation = document.getElementById('ai-accommodation').checked ? "需要住宿" : "不需要住宿";
+                const custom = document.getElementById('ai-custom').value;
+                
+                userPrompt = `
+                    請為我規劃一個 ${days} 天的 ${destination} 旅遊行程。
+                    主要交通方式: ${transport}。
+                    住宿需求: ${accommodation}。
+                    其他需求: ${custom || '無'}。
+                    請提供每天的詳細行程、交通建議、預估時間，並推薦餐飲和住宿地點。
+                `;
+            } else if (type === 'sports') {
+                const sportType = document.getElementById('sport-type').value;
+                const sportMode = document.getElementById('sport-mode').value;
+                
+                systemPrompt += " 你現在的專長是規劃戶外運動挑戰，例如環島。";
+                userPrompt = `
+                    請為我規劃一個 ${sportMode} ${sportType} 的挑戰路線。
+                    請包含每日的路線規劃、預計里程、沿途的補給點、住宿建議和可以順道參觀的景點。
+                    安全性是最高考量。
+                `;
+            }
+
+            try {
+                const result = await callGeminiAPI(systemPrompt, userPrompt, true); // 啟用 Google 搜尋
+                
+                // 渲染結果 (簡易 Markdown 轉 HTML)
+                let html = convertMarkdownToHTML(result.text);
+
+                // 顯示搜尋來源
+                if (result.sources && result.sources.length > 0) {
+                    html += `<h3 class="text-lg font-semibold mt-6 mb-2">資料來源 (整合自即時開放資料):</h3>
+                             <ul class="list-disc list-inside text-sm text-gray-600">`;
+                    result.sources.forEach(source => {
+                        html += `<li><a href="${source.uri}" target="_blank" class="text-blue-600 hover:underline">${source.title}</a></li>`;
+                    });
+                    html += `</ul>`;
+                }
+                
+                // 新增翻譯和語音導覽按鈕
+                html += `
+                    <div classs="mt-6 flex space-x-2">
+                        <button onclick="translateContent('itinerary-result', 'en')" class="bg-green-500 text-white px-4 py-2 rounded-lg text-sm mt-4">翻譯成英文</button>
+                        <button onclick="playAudioGuideForContent('itinerary-result')" class="bg-purple-500 text-white px-4 py-2 rounded-lg text-sm mt-4">播放行程簡介</button>
+                    </div>
+                `;
+
+                resultContainer.innerHTML = html;
+
+                // 模擬儲存偏好
+                if (type === 'travel' && window.currentUserId) {
+                    const dest = document.getElementById('ai-destination').value;
+                    await saveFrequentPlace(window.currentUserId, dest);
+                }
+
+            } catch (error) {
+                resultContainer.innerHTML = `<p class="text-red-500">行程規劃失敗：${error.message}</p>`;
+            } finally {
+                loadingSpinner.classList.add('hidden');
+            }
+        };
+        
+        // 儲存常用地區 (簡易版)
+        async function saveFrequentPlace(userId, place) {
+            if (!userId || !place) return;
+            const prefRef = doc(db, `artifacts/${appId}/users/${userId}/profile`, "preferences");
+            try {
+                const docSnap = await getDoc(prefRef);
+                let currentPlaces = [];
+                if (docSnap.exists()) {
+                    currentPlaces = docSnap.data().frequentPlaces || [];
+                }
+                if (!currentPlaces.includes(place)) {
+                    currentPlaces.push(place);
+                    // 只保留最新的5個
+                    if (currentPlaces.length > 5) {
+                        currentPlaces = currentPlaces.slice(-5);
+                    }
+                    await setDoc(prefRef, { frequentPlaces: currentPlaces }, { merge: true });
+                    console.log("Updated frequent places:", currentPlaces);
+                    // 立即更新 UI
+                    fetchUserPreferences(userId);
+                }
+            } catch (error) {
+                console.error("Error saving frequent place:", error);
+            }
+        }
+
+        // 簡易 Markdown 轉 HTML
+        function convertMarkdownToHTML(text) {
+            return text
+                .replace(/^### (.*$)/gim, '<h3 class="text-xl font-semibold mt-4 mb-2">$1</h3>')
+                .replace(/^## (.*$)/gim, '<h2 class="text-2xl font-bold mt-6 mb-3 border-b pb-1">$1</h2>')
+                .replace(/^# (.*$)/gim, '<h1 class="text-3xl font-extrabold mt-8 mb-4">$1</h1>')
+                .replace(/\*\*(.*)\*\*/gim, '<strong>$1</strong>')
+                .replace(/\*(.*)\*/gim, '<em>$1</em>')
+                .replace(/^\* (.*$)/gim, '<li class="ml-4 list-disc">$1</li>')
+                .replace(/\n/gim, '<br>'); // 將換行符轉為 <br>
+        }
+
+        // --- AI 聊天 ---
+        window.toggleAIChat = () => {
+            document.getElementById('ai-chat-window').classList.toggle('hidden');
+        };
+
+        window.handleAIChatSend = async () => {
+            const chatInput = document.getElementById('ai-chat-input');
+            const chatBody = document.getElementById('ai-chat-body');
+            const userText = chatInput.value;
+            if (!userText) return;
+
+            // 顯示使用者訊息
+            chatBody.innerHTML += `<div class="text-right"><span class="bg-blue-600 text-white px-4 py-2 rounded-lg inline-block">${userText}</span></div>`;
+            chatInput.value = '';
+            chatBody.scrollTop = chatBody.scrollHeight;
+
+            // (可選) 獲取當前行程作為上下文
+            const itineraryContext = document.getElementById('itinerary-result').innerText;
+            
+            const systemPrompt = "你是一個 AI 旅遊助理。請簡潔地回答使用者的問題。如果他們提到 '行程'，請參考他們目前的行程計畫來回答。";
+            const userPrompt = `
+                目前行程: ${itineraryContext ? itineraryContext.substring(0, 500) + "..." : "無"}
+                
+                使用者問題: ${userText}
+            `;
+
+            try {
+                const result = await callGeminiAPI(systemPrompt, userPrompt, false); // 聊天不需要搜尋
+                
+                // 顯示 AI 回應
+                chatBody.innerHTML += `<div class="text-left"><span class="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg inline-block">${result.text}</span></div>`;
+
+            } catch (error) {
+                chatBody.innerHTML += `<div class="text-left"><span class="bg-red-100 text-red-700 px-4 py-2 rounded-lg inline-block">抱歉，我現在無法回應：${error.message}</span></div>`;
+            }
+            chatBody.scrollTop = chatBody.scrollHeight;
+        };
+        
+        // --- 翻譯功能 (簡易版) ---
+        window.translateContent = async (elementId, targetLang) => {
+            const element = document.getElementById(elementId);
+            const originalText = element.dataset.originalText || element.innerText;
+            
+            // 儲存原文
+            if (!element.dataset.originalText) {
+                element.dataset.originalText = originalText;
+            }
+
+            // 如果是切換回原文
+            if (targetLang === 'original') {
+                element.innerHTML = convertMarkdownToHTML(element.dataset.originalText); // 假設原文是 markdown
+                // 更新按鈕
+                const translateBtn = element.querySelector('button[onclick*="translateContent"]');
+                if(translateBtn) translateBtn.outerHTML = `<button onclick="translateContent('itinerary-result', 'en')" class="bg-green-500 text-white px-4 py-2 rounded-lg text-sm mt-4">翻譯成英文</button>`;
+                return;
+            }
+
+            const systemPrompt = "你是一個專業的翻譯引擎。請將以下文字翻譯成指定的語言。只輸出翻譯後的文字，不要有任何額外的說明。";
+            const userPrompt = `將以下內容翻譯成 ${targetLang}: \n\n ${originalText}`;
+
+            try {
+                const result = await callGeminiAPI(systemPrompt, userPrompt, false);
+                element.innerHTML = convertMarkdownToHTML(result.text); // 翻譯後的內容也轉為 HTML
+                
+                // 新增切回原文按鈕
+                element.innerHTML += `<button onclick="translateContent('itinerary-result', 'original')" class="bg-gray-500 text-white px-4 py-2 rounded-lg text-sm mt-4">切換回原文</button>`;
+
+            } catch (error) {
+                showMessage("翻譯失敗", error.message);
+            }
+        };
+
+        // --- 語音導覽 (TTS) ---
+        let currentAudio = null;
+        
+        // Base64 轉 ArrayBuffer
+        function base64ToArrayBuffer(base64) {
+            const binaryString = window.atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        // PCM 轉 WAV (核心輔助函式)
+        function pcmToWav(pcmData, sampleRate) {
+            const header = new ArrayBuffer(44);
+            const d = new DataView(header);
+            
+            // RIFF
+            d.setUint8(0, 0x52); d.setUint8(1, 0x49); d.setUint8(2, 0x46); d.setUint8(3, 0x46);
+            // 檔案大小 (PCM data size + 36 bytes)
+            d.setUint32(4, 36 + pcmData.byteLength, true);
+            // WAVE
+            d.setUint8(8, 0x57); d.setUint8(9, 0x41); d.setUint8(10, 0x56); d.setUint8(11, 0x45);
+            // fmt
+            d.setUint8(12, 0x66); d.setUint8(13, 0x6D); d.setUint8(14, 0x74); d.setUint8(15, 0x20);
+            // Sub-chunk 1 size (16 for PCM)
+            d.setUint32(16, 16, true);
+            // Audio format (1 for PCM)
+            d.setUint16(20, 1, true);
+            // 聲道數 (1 for mono)
+            d.setUint16(22, 1, true);
+            // 採樣率
+            d.setUint32(24, sampleRate, true);
+            // Byte rate (SampleRate * NumChannels * BitsPerSample/8)
+            d.setUint32(28, sampleRate * 1 * 16 / 8, true);
+            // Block align (NumChannels * BitsPerSample/8)
+            d.setUint16(32, 1 * 16 / 8, true);
+            // Bits per sample (16)
+            d.setUint16(34, 16, true);
+            // data
+            d.setUint8(36, 0x64); d.setUint8(37, 0x61); d.setUint8(38, 0x74); d.setUint8(39, 0x61);
+            // Sub-chunk 2 size (PCM data size)
+            d.setUint32(40, pcmData.byteLength, true);
+
+            return new Blob([header, pcmData], { type: 'audio/wav' });
+        }
+
+        async function callTTSAPI(text) {
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`;
+            
+            const payload = {
+                contents: [{
+                    parts: [{ text: `用友善、資訊豐富的語氣說: ${text}` }]
+                }],
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: "Kore" } // 選擇一個聲音
+                        }
+                    }
+                },
+                model: "gemini-2.5-flash-preview-tts"
+            };
+            
+            try {
+                const response = await fetchWithRetry(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!response.ok) throw new Error(`TTS API 錯誤: ${response.status}`);
+                
+                const result = await response.json();
+                const part = result?.candidates?.[0]?.content?.parts?.[0];
+                const audioData = part?.inlineData?.data;
+                const mimeType = part?.inlineData?.mimeType;
+
+                if (audioData && mimeType && mimeType.startsWith("audio/")) {
+                    const sampleRateMatch = mimeType.match(/rate=(\d+)/);
+                    const sampleRate = sampleRateMatch ? parseInt(sampleRateMatch[1], 10) : 24000; // 預設 24kHz
+                    
+                    const pcmData = base64ToArrayBuffer(audioData);
+                    const pcm16 = new Int16Array(pcmData);
+                    const wavBlob = pcmToWav(pcm16, sampleRate);
+                    return URL.createObjectURL(wavBlob);
+                } else {
+                    throw new Error("未收到有效的音訊資料。");
+                }
+            } catch (error) {
+                console.error("TTS 失敗:", error);
+                throw error;
+            }
+        }
+
+        window.playAudioGuideForContent = async (elementId) => {
+            const element = document.getElementById(elementId);
+            let textToSpeak = element.dataset.originalText || element.innerText;
+            
+            // 擷取前 300 字元作為簡介
+            textToSpeak = textToSpeak.substring(0, 300) + "... 這就是您的行程簡介。";
+            
+            await window.playAudioGuide(textToSpeak, 'tts-btn-itinerary');
+        };
+
+        window.playAudioGuide = async (text, buttonId) => {
+            const button = document.getElementById(buttonId) || document.querySelector(`button[onclick*="${text.substring(0,10)}"]`);
+            const originalText = button.innerHTML;
+
+            if (currentAudio && !currentAudio.paused) {
+                currentAudio.pause();
+                currentAudio = null;
+                button.innerHTML = originalText;
+                return;
+            }
+
+            try {
+                button.innerHTML = '<i data-lucide="loader-2" class="animate-spin"></i> 處理中...';
+                if (typeof lucide !== 'undefined') lucide.createIcons(); // Added check
+                
+                const audioUrl = await callTTSAPI(text);
+                
+                currentAudio = new Audio(audioUrl);
+                currentAudio.play();
+                button.innerHTML = '<i data-lucide="pause-circle"></i> 播放中...';
+                if (typeof lucide !== 'undefined') lucide.createIcons(); // Added check
+
+                currentAudio.onended = () => {
+                    button.innerHTML = originalText;
+                    currentAudio = null;
+                    URL.revokeObjectURL(audioUrl); // 釋放資源
+                };
+
+            } catch (error) {
+                showMessage("語音播放失敗", error.message);
+                button.innerHTML = originalText;
+            }
+        };
+
+
+        // --- 初始化 ---
+        document.addEventListener('DOMContentLoaded', () => {
+            showView('view-home'); // 顯示首頁
+            
+            // 檢查 lucide 是否已載入
+            if (typeof lucide !== 'undefined') {
+                lucide.createIcons(); // 初始化圖示
+            } else {
+                // 如果 lucide 尚未載入，稍後重試
+                console.log("Lucide not ready, retrying in 500ms");
+                setTimeout(() => {
+                    if (typeof lucide !== 'undefined') {
+                        lucide.createIcons();
+                    } else {
+                        console.error("Lucide icons library failed to load.");
+                    }
+                }, 500); // 500ms 延遲
+            }
+            
+            // 綁定導覽列點擊事件
+            document.querySelectorAll('#main-nav button').forEach(btn => {
+                btn.addEventListener('click', () => showView(btn.dataset.view));
+            });
+            // 綁定彈窗關閉事件
+            document.querySelectorAll('.modal-close').forEach(btn => {
+                btn.addEventListener('click', () => closeModal(btn.closest('.modal-container').id));
+            });
+        });
+
+    </script>
+
+    <!-- 頂部導覽列 -->
+    <nav class="bg-white shadow-md sticky top-0 z-50">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+            <!-- Logo -->
+            <div class="flex items-center space-x-2">
+                <i data-lucide="palmtree" class="text-blue-600"></i>
+                <span class="text-xl font-bold text-gray-800">AI 智慧旅遊</span>
+            </div>
+
+            <!-- 主要導覽 -->
+            <div id="main-nav" class="hidden md:flex items-center space-x-6">
+                <button data-view="view-home" class="text-gray-600 hover:text-blue-600 transition-colors flex items-center space-x-1">
+                    <i data-lucide="home" class="w-4 h-4"></i><span>首頁</span>
+                </button>
+                <button data-view="view-explore" class="text-gray-600 hover:text-blue-600 transition-colors flex items-center space-x-1">
+                    <i data-lucide="search" class="w-4 h-4"></i><span>探索景點</span>
+                </button>
+                <button data-view="view-planner" class="text-gray-600 hover:text-blue-600 transition-colors flex items-center space-x-1">
+                    <i data-lucide="bot" class="w-4 h-4"></i><span>AI 規劃</span>
+                </button>
+                <button data-view="view-sports" class="text-gray-600 hover:text-blue-600 transition-colors flex items-center space-x-1">
+                    <i data-lucide="bike" class="w-4 h-4"></i><span>運動挑戰</span>
+                </button>
+                <button data-view="view-my-trips" class="text-gray-600 hover:text-blue-600 transition-colors flex items-center space-x-1">
+                    <i data-lucide="map" class="w-4 h-4"></i><span>我的行程</span>
+                </button>
+            </div>
+
+            <!-- 使用者區域 -->
+            <div class="flex items-center space-x-3">
+                <!-- 未登入時顯示 -->
+                <div id="auth-nav" class="flex items-center space-x-2">
+                    <button onclick="showModal('login-modal')" class="text-sm text-gray-600 hover:text-blue-600">登入</button>
+                    <button onclick="showModal('register-modal')" class="text-sm bg-blue-600 text-white px-4 py-2 rounded-full shadow-md hover:bg-blue-700 transition-colors">
+                        註冊
+                    </button>
+                </div>
+                <!-- 登入後顯示 -->
+                <div id="user-nav" class="hidden flex items-center space-x-3">
+                    <span id="user-email-display" class="text-sm text-gray-500 hidden md:block"></span>
+                    <button class="text-gray-600 hover:text-blue-600 relative">
+                        <i data-lucide="bell"></i>
+                        <span class="absolute -top-1 -right-1 bg-red-500 text-white text-xs w-4 h-4 rounded-full flex items-center justify-center">2</span>
+                    </button>
+                    <button onclick="handleLogout()" class="text-gray-600 hover:text-blue-600">
+                        <i data-lucide="log-out" class="w-5 h-5"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- ==== 主要內容區域 ==== -->
+    <main class="container mx-auto p-4 md:p-6">
+
+        <!-- --- 首頁 (view-home) --- -->
+        <div id="view-home" class="page-view">
+            <!-- Hero Section -->
+            <div class="bg-gradient-to-r from-blue-600 to-indigo-700 text-white rounded-2xl shadow-xl p-8 md:p-16 text-center my-6">
+                <h1 class="text-4xl md:text-5xl font-extrabold mb-4">探索世界，AI 為您領航</h1>
+                <p class="text-lg md:text-xl text-blue-100 mb-8">整合即時開放資料，從交通、住宿到行程，一鍵搞定。</p>
+                <div class="max-w-2xl mx-auto bg-white/20 p-2 rounded-full flex items-center shadow-lg">
+                    <input type="text" placeholder="搜尋目的地、景點或活動..." class="w-full bg-transparent text-white placeholder-blue-100 px-6 py-3 rounded-full border-none focus:outline-none">
+                    <button class="bg-white text-blue-600 rounded-full p-3 shadow-md hover:bg-gray-100 transition-colors mr-1">
+                        <i data-lucide="search" class="w-6 h-6"></i>
+                    </button>
+                </div>
+            </div>
+            
+            <!-- 快捷存取 -->
+            <div id="quick-access" class="my-6 p-4 bg-blue-50 rounded-lg hidden flex items-center space-x-3">
+                <!-- 內容由 JS 動態載入 -->
+            </div>
+
+            <!-- 功能區塊 -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 my-8">
+                <!-- AI 規劃 -->
+                <div class="bg-white p-6 rounded-xl shadow-lg hover:shadow-xl transition-shadow cursor-pointer" onclick="showView('view-planner')">
+                    <i data-lucide="bot" class="w-12 h-12 text-blue-600 mb-4"></i>
+                    <h3 class="text-xl font-semibold mb-2">AI 行程規劃</h3>
+                    <p class="text-gray-600 text-sm">輸入條件，AI 自動生成完美行程，支援評價、交通、住宿偏好。</p>
+                </div>
+                <!-- 運動挑戰 -->
+                <div class="bg-white p-6 rounded-xl shadow-lg hover:shadow-xl transition-shadow cursor-pointer" onclick="showView('view-sports')">
+                    <i data-lucide="bike" class="w-12 h-12 text-green-600 mb-4"></i>
+                    <h3 class="text-xl font-semibold mb-2">運動挑戰</h3>
+                    <p class="text-gray-600 text-sm">徒步、自行車環島？AI 幫您規劃路線、住宿與沿途景點。</p>
+                </div>
+                <!-- 熱度預測 -->
+                <div class="bg-white p-6 rounded-xl shadow-lg hover:shadow-xl transition-shadow cursor-pointer" onclick="showView('view-explore')">
+                    <i data-lucide="flame" class="w-12 h-12 text-red-600 mb-4"></i>
+                    <h3 class="text-xl font-semibold mb-2">景點熱度預測</h3>
+                    <p class="text-gray-600 text-sm">避開人潮，AI 預測景點擁擠時段，讓您玩得更盡興。</p>
+                </div>
+                <!-- 協作共享 -->
+                <div class="bg-white p-6 rounded-xl shadow-lg hover:shadow-xl transition-shadow cursor-pointer" onclick="showView('view-my-trips')">
+                    <i data-lucide="users" class="w-12 h-12 text-purple-600 mb-4"></i>
+                    <h3 class="text-xl font-semibold mb-2">行程協作共享</h3>
+                    <p class="text-gray-600 text-sm">邀請好友共同編輯行程，還能推薦或複製他人的精彩路線。</p>
+                </div>
+            </div>
+            
+            <!-- 推薦行程 (模擬) -->
+            <h2 class="text-2xl font-bold mb-4">熱門推薦行程</h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <!-- 推薦卡片 1 -->
+                <div class="bg-white rounded-xl shadow-lg overflow-hidden">
+                    <img src="https://placehold.co/600x400/3498db/ffffff?text=台北文化之旅" alt="" class="w-full h-48 object-cover">
+                    <div class="p-4">
+                        <span class="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">3 天 2 夜</span>
+                        <h4 class="text-lg font-semibold my-2">台北經典文化之旅</h4>
+                        <p class="text-sm text-gray-600 mb-3">故宮、101、九份老街...</p>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-800 font-semibold">TWD 5,000 起</span>
+                            <button class="text-blue-600 text-sm hover:underline">查看詳情</button>
+                        </div>
+                    </div>
+                </div>
+                <!-- 推薦卡片 2 -->
+                <div class="bg-white rounded-xl shadow-lg overflow-hidden">
+                    <img src="https://placehold.co/600x400/2ecc71/ffffff?text=花東縱谷" alt="" class="w-full h-48 object-cover">
+                    <div class="p-4">
+                        <span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">5 天 4 夜</span>
+                        <h4 class="text-lg font-semibold my-2">花東縱谷自行車慢遊</h4>
+                        <p class="text-sm text-gray-600 mb-3">伯朗大道、太魯閣、七星潭...</p>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-800 font-semibold">TWD 8,000 起</span>
+                            <button class="text-blue-600 text-sm hover:underline">查看詳情</button>
+                        </div>
+                    </div>
+                </div>
+                <!-- 推薦卡片 3 -->
+                <div class="bg-white rounded-xl shadow-lg overflow-hidden">
+                    <img src="https://placehold.co/600x400/e74c3c/ffffff?text=台南美食" alt="" class="w-full h-48 object-cover">
+                    <div class="p-4">
+                        <span class="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full">2 天 1 夜</span>
+                        <h4 class="text-lg font-semibold my-2">台南美食吃到飽</h4>
+                        <p class="text-sm text-gray-600 mb-3">國華街、安平古堡、牛肉湯...</p>
+                        <div class="flex justify-between items-center">
+                            <span class="text-gray-800 font-semibold">TWD 3,500 起</span>
+                            <button class="text-blue-600 text-sm hover:underline">查看詳情</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- --- 探索景點 (view-explore) --- -->
+        <div id="view-explore" class="page-view">
+            <h2 class="text-3xl font-bold mb-6">探索景點</h2>
+            <!-- 篩選器 -->
+            <div class="flex flex-wrap gap-4 mb-6 p-4 bg-white rounded-lg shadow">
+                <select class="border rounded-lg px-4 py-2">
+                    <option>所有地區</option>
+                    <option>台北</option>
+                    <option>台中</option>
+                    <option>花蓮</option>
+                </select>
+                <select class="border rounded-lg px-4 py-2">
+                    <option>所有類型</option>
+                    <option>自然景觀</option>
+                    <option>人文歷史</option>
+                    <option>美食</option>
+                </select>
+                <button class="bg-blue-600 text-white px-6 py-2 rounded-lg">篩選</button>
+            </div>
+            
+            <!-- 景點列表 (模擬) -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <!-- 景點卡片 -->
+                <div class="bg-white rounded-xl shadow-lg overflow-hidden">
+                    <img src="https://placehold.co/600x400/9b59b6/ffffff?text=模擬景點 A" alt="" class="w-full h-48 object-cover">
+                    <div class="p-4">
+                        <div class="flex justify-between items-center mb-2">
+                            <h4 class="text-lg font-semibold">模擬景點 A (台北)</h4>
+                            <span class="flex items-center text-yellow-500"><i data-lucide="star" class="w-4 h-4 fill-current"></i> 4.5</span>
+                        </div>
+                        <p class="text-sm text-gray-600 mb-3">這是一個很棒的景點介紹文字...</p>
+                        <!-- 熱度預測條 -->
+                        <div class="w-full bg-gray-200 rounded-full h-2.5">
+                            <div class="bg-red-500 h-2.5 rounded-full" style="width: 80%"></div>
+                        </div>
+                        <p class="text-xs text-red-600 text-center mt-1">目前熱門</p>
+                        <button id="tts-btn-1" onclick="playAudioGuide('這是模擬景點 A 的語音導覽，位於台北市，是一個充滿人文氣息的地方。', 'tts-btn-1')" class="w-full mt-3 bg-purple-100 text-purple-700 px-4 py-2 rounded-lg text-sm flex items-center justify-center space-x-1 hover:bg-purple-200">
+                            <i data-lucide="play-circle" class="w-4 h-4"></i>
+                            <span>播放語音導覽</span>
+                        </button>
+                    </div>
+                </div>
+                <!-- 更多卡片... -->
+            </div>
+        </div>
+        
+        <!-- --- AI 規劃 (view-planner) --- -->
+        <div id="view-planner" class="page-view">
+            <h2 class="text-3xl font-bold mb-6">AI 行程規劃</h2>
+            <div class="max-w-2xl mx-auto bg-white p-8 rounded-2xl shadow-xl">
+                <h3 class="text-xl font-semibold mb-6">告訴 AI 您的需求</h3>
+                <div class="space-y-4">
+                    <div>
+                        <label for="ai-destination" class="block text-sm font-medium text-gray-700 mb-1">目的地 (可多個，用逗號分隔)</label>
+                        <input type="text" id="ai-destination" value="台北" class="w-full border border-gray-300 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label for="ai-days" class="block text-sm font-medium text-gray-700 mb-1">旅遊天數</label>
+                            <input type="number" id="ai-days" value="3" class="w-full border border-gray-300 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        </div>
+                        <div>
+                            <label for="ai-transport" class="block text-sm font-medium text-gray-700 mb-1">主要交通</label>
+                            <select id="ai-transport" class="w-full border border-gray-300 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                <option value="大眾運輸">大眾運輸</option>
+                                <option value="自行開車">自行開車</option>
+                                <option value="混合">混合</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div>
+                        <label for="ai-custom" class="block text-sm font-medium text-gray-700 mb-1">其他需求 (例如: 喜好、預算、必去景點)</label>
+                        <textarea id="ai-custom" rows="3" placeholder="例如：親子友善、步調放慢、想去九份" class="w-full border border-gray-300 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+                    </div>
+                    <div class="flex items-center">
+                        <input type="checkbox" id="ai-accommodation" checked class="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500">
+                        <label for="ai-accommodation" class="ml-2 block text-sm text-gray-900">需要 AI 推薦住宿</label>
+                    </div>
+                    <button onclick="handleAIPlan('travel')" class="w-full bg-blue-600 text-white px-6 py-3 rounded-lg text-lg font-semibold shadow-lg hover:bg-blue-700 transition-colors flex items-center justify-center space-x-2">
+                        <i data-lucide="wand-2"></i>
+                        <span>開始規劃</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- --- 運動挑戰 (view-sports) --- -->
+        <div id="view-sports" class="page-view">
+            <h2 class="text-3xl font-bold mb-6">運動挑戰規劃</h2>
+            <div class="max-w-2xl mx-auto bg-white p-8 rounded-2xl shadow-xl">
+                <h3 class="text-xl font-semibold mb-6">選擇您的挑戰</h3>
+                <div class="space-y-4">
+                    <div>
+                        <label for="sport-type" class="block text-sm font-medium text-gray-700 mb-1">挑戰類型</label>
+                        <select id="sport-type" class="w-full border border-gray-300 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="環島 (台灣本島)">環島 (台灣本島)</option>
+                            <option value="長程縱走">長程縱走</option>
+                            <option value="自訂路線">自訂路線</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="sport-mode" class="block text-sm font-medium text-gray-700 mb-1">挑戰方式</label>
+                        <select id="sport-mode" class="w-full border border-gray-300 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="自行車">自行車</option>
+                            <option value="徒步">徒步</option>
+                            <option value="機車">機車</option>
+                        </select>
+                    </div>
+                    <!-- 更多運動相關選項... -->
+                    <button onclick="handleAIPlan('sports')" class="w-full bg-green-600 text-white px-6 py-3 rounded-lg text-lg font-semibold shadow-lg hover:bg-green-700 transition-colors flex items-center justify-center space-x-2">
+                        <i data-lucide="route"></i>
+                        <span>規劃挑戰路線</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- --- 我的行程 (view-my-trips) --- -->
+        <div id="view-my-trips" class="page-view">
+            <h2 class="text-3xl font-bold mb-6">我的行程</h2>
+            <p class="text-gray-600">這裡是您儲存的行程、以及他人與您協作的行程。（此處為模擬，真實資料需從 Firestore 讀取）</p>
+            <!-- 模擬的行程卡片 -->
+            <div class="mt-6 bg-white p-6 rounded-lg shadow-md flex justify-between items-center">
+                <div>
+                    <h4 class="text-lg font-semibold">我的 3 日台北之旅 (模擬)</h4>
+                    <p class="text-sm text-gray-500">已儲存 | 協作者：您、張三</p>
+                </div>
+                <div>
+                    <button class="bg-blue-100 text-blue-700 px-4 py-2 rounded-lg text-sm">查看</button>
+                    <button class="text-red-500 hover:text-red-700 ml-2"><i data-lucide="trash-2" class="w-5 h-5"></i></button>
+                </div>
+            </div>
+        </div>
+
+        <!-- --- AI 行程結果頁面 (view-itinerary) --- -->
+        <div id="view-itinerary" class="page-view">
+            <h2 class="text-3xl font-bold mb-4">您的 AI 規劃行程</h2>
+            
+            <!-- 讀取中 -->
+            <div id="loading-spinner" class="hidden text-center my-12">
+                <i data-lucide="loader-2" class="w-16 h-16 text-blue-600 animate-spin mx-auto"></i>
+                <p class="text-lg text-gray-600 mt-4">AI 正在整合即時資料，為您規劃中...</p>
+            </div>
+
+            <!-- 結果容器 -->
+            <div class="bg-white p-6 md:p-8 rounded-2xl shadow-xl">
+                <!-- 行程控制按鈕 -->
+                <div class="flex flex-wrap gap-2 mb-6 border-b pb-4">
+                    <button class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm flex items-center space-x-1"><i data-lucide="save" class="w-4 h-4"></i><span>儲存行程</span></button>
+                    <button class="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm flex items-center space-x-1"><i data-lucide="share-2" class="w-4 h-4"></i><span>協作共享</span></button>
+                    <button class="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm flex items-center space-x-1"><i data-lucide="copy" class="w-4 h-4"></i><span>複製行程</span></button>
+                    <button class="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm flex items-center space-x-1"><i data-lucide="star" class="w-4 h-4"></i><span>評價此行程</span></button>
+                </div>
+
+                <!-- 行程分頁 (模擬) -->
+                <div class="flex space-x-4 border-b mb-6">
+                    <button class="py-2 px-4 border-b-2 border-blue-600 text-blue-600 font-semibold flex items-center space-x-1">
+                        <i data-lucide="calendar-days" class="w-4 h-4"></i><span>每日行程</span>
+                    </button>
+                    <button class="py-2 px-4 text-gray-500 hover:text-gray-800 flex items-center space-x-1">
+                        <i data-lucide="map-pin" class="w-4 h-4"></i><span>地圖總覽</span>
+                    </button>
+                    <button class="py-2 px-4 text-gray-500 hover:text-gray-800 flex items-center space-x-1">
+                        <i data-lucide="dollar-sign" class="w-4 h-4"></i><span>預算追蹤</span>
+                    </button>
+                </div>
+
+                <!-- 內容 (由 AI 填入) -->
+                <div id="itinerary-result" class="prose prose-lg max-w-none">
+                    <!-- AI 生成的內容將顯示在這裡 -->
+                </div>
+
+                <!-- 地圖 (佔位符) -->
+                <div id="map-container" class="w-full h-64 bg-gray-200 rounded-lg my-6 flex items-center justify-center text-gray-500">
+                    [ 地圖整合區域 (Map Integration Placeholder) ]
+                </div>
+                
+                <!-- 預算 (佔位符) -->
+                <div id="budget-tracker" class="my-6">
+                    <h3 class="text-xl font-semibold mb-3">預算追蹤 (模擬)</h3>
+                    <div class="w-full bg-gray-200 rounded-full h-6">
+                        <div class="bg-green-500 h-6 rounded-full text-white text-sm flex items-center justify-center" style="width: 40%">
+                            已使用 40% (TWD 4,000 / 10,000)
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+    
+    <!-- ==== AI 即時修改對話框 ==== -->
+    <div class="fixed bottom-4 right-4 z-40">
+        <!-- 聊天視窗 (預設隱藏) -->
+        <div id="ai-chat-window" class="hidden w-80 h-96 bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden border border-gray-200 modal-content">
+            <div class="bg-blue-600 text-white p-4 flex justify-between items-center">
+                <h4 class="font-semibold">AI 行程助理</h4>
+                <button onclick="toggleAIChat()" class="text-blue-100 hover:text-white">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+            <!-- 聊天內容 -->
+            <div id="ai-chat-body" class="flex-1 p-4 space-y-4 overflow-y-auto no-scrollbar">
+                <!-- 範例訊息 -->
+                <div class="text-left">
+                    <span class="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg inline-block">您好！需要我幫您修改行程嗎？</span>
+                </div>
+            </div>
+            <!-- 輸入框 -->
+            <div class="p-2 border-t flex">
+                <input id="ai-chat-input" type="text" placeholder="輸入訊息..." class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500">
+                <button onclick="handleAIChatSend()" class="bg-blue-600 text-white p-2 rounded-lg ml-2 hover:bg-blue-700">
+                    <i data-lucide="send" class="w-5 h-5"></i>
+                </button>
+            </div>
+        </div>
+        
+        <!-- 觸發按鈕 -->
+        <button onclick="toggleAIChat()" class="bg-blue-600 text-white w-16 h-16 rounded-full shadow-xl flex items-center justify-center hover:bg-blue-700 transition-transform hover:scale-110">
+            <i data-lucide="message-circle" class="w-8 h-8"></i>
+        </button>
+    </div>
+
+
+    <!-- ==== 彈出視窗 (Modals) ==== -->
+
+    <!-- 登入 Modal -->
+    <div id="login-modal" class="modal-container hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div class="modal-content bg-white p-8 rounded-2xl shadow-2xl max-w-sm w-full">
+            <button class="modal-close absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                <i data-lucide="x"></i>
+            </button>
+            <h3 class="text-2xl font-bold text-center mb-6">歡迎回來</h3>
+            <div class="space-y-4">
+                <div>
+                    <label for="login-email" class="block text-sm font-medium text-gray-700 mb-1">電子郵件</label>
+                    <input type="email" id="login-email" class="w-full border border-gray-300 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                    <label for="login-password" class="block text-sm font-medium text-gray-700 mb-1">密碼</label>
+                    <input type="password" id="login-password" class="w-full border border-gray-300 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <button onclick="handleLogin()" class="w-full bg-blue-600 text-white px-6 py-3 rounded-lg text-lg font-semibold shadow-lg hover:bg-blue-700 transition-colors">
+                    登入
+                </button>
+                <p class="text-sm text-center text-gray-600">
+                    還沒有帳號？ <button onclick="closeModal('login-modal'); showModal('register-modal')" class="text-blue-600 hover:underline">立即註冊</button>
+                </p>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 註冊 Modal -->
+    <div id="register-modal" class="modal-container hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div class="modal-content bg-white p-8 rounded-2xl shadow-2xl max-w-sm w-full">
+            <button class="modal-close absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                <i data-lucide="x"></i>
+            </button>
+            <h3 class="text-2xl font-bold text-center mb-6">建立新帳號</h3>
+            <div class="space-y-4">
+                <div>
+                    <label for="reg-email" class="block text-sm font-medium text-gray-700 mb-1">電子郵件</label>
+                    <input type="email" id="reg-email" class="w-full border border-gray-300 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                    <label for="reg-password" class="block text-sm font-medium text-gray-700 mb-1">密碼</Flabel>
+                    <input type="password" id="reg-password" class="w-full border border-gray-300 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <button onclick="handleRegister()" class="w-full bg-blue-600 text-white px-6 py-3 rounded-lg text-lg font-semibold shadow-lg hover:bg-blue-700 transition-colors">
+                    註冊
+                </button>
+                <p class="text-sm text-center text-gray-600">
+                    已經有帳號？ <button onclick="closeModal('register-modal'); showModal('login-modal')" class="text-blue-600 hover:underline">立即登入</button>
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 通用訊息 Modal -->
+    <div id="message-modal" class="modal-container hidden fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div class="modal-content bg-white p-8 rounded-2xl shadow-2xl max-w-sm w-full text-center">
+            <h3 id="message-title" class="text-xl font-semibold mb-4">訊息</h3>
+            <p id="message-body" class="text-gray-600 mb-6">這是一條訊息。</p>
+            <button onclick="closeModal('message-modal')" class="bg-blue-600 text-white px-6 py-2 rounded-lg shadow hover:bg-blue-700">
+                確定
+            </button>
+        </div>
+    </div>
+
+</body>
+</html>
